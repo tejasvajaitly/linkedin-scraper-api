@@ -1,76 +1,3 @@
-// const express = require('express');
-// const app = express();
-
-// // Middleware to parse JSON request bodies.
-// app.use(express.json());
-
-// // Import Playwright for scraping
-// const playwright = require('playwright');
-
-// // Define a function that uses Playwright to scrape the page
-// async function scrapePage(url, fields, cookies) {
-//   console.log(`Scraping ${url}`);
-//   const browser = await playwright.chromium.launch({ headless: false });
-//   const context = await browser.newContext();
-
-//   // If cookies are provided, add them to the context.
-//   if (cookies && Array.isArray(cookies)) {
-//     console.log('Adding cookies to the context');
-//     await context.addCookies(cookies);
-//   }
-  
-//   const page = await context.newPage();
-  
-//   // Navigate to the provided URL and wait until network is idle
-//   await page.goto(url, { waitUntil: 'load', timeout: 120000 });
-//   console.log("Page loaded");
-  
-//     const button = await page.$('button[aria-label^="Current company:"]');
-//     if (button) {
-//     const ariaLabel = await button.getAttribute('aria-label');
-//     // "Current company: WisdomAI. Click to skip to experience card"
-//     const match = ariaLabel.match(/Current company:\s*(.*?)\.\s*Click to skip/);
-//     if (match) {
-//         const currentCompany = match[1]; // e.g. "WisdomAI"
-//         console.log("Current company:", currentCompany);
-//     }
-//     }
-
-//   // You can expand this to scrape additional fields based on the 'fields' parameter
-  
-//   await browser.close();
-//   return { htmlContent };
-// }
-
-// // Simple GET endpoint
-// app.get('/', (req, res) => {
-//   res.send('Hello, World!');
-// });
-
-// // POST endpoint for /scrape
-// app.post('/scrape', async (req, res) => {
-//   try {
-//     const { url, fields, cookies } = req.body;
-//     if (!url) {
-//       return res.status(400).json({ error: 'URL is required' });
-//     }
-    
-//     const data = await scrapePage(url, fields, cookies);
-//     res.json(data);
-//   } catch (error) {
-//     console.error('Scrape error:', error);
-//     res.status(500).json({ error: error.toString() });
-//   }
-// });
-
-// const port = 3000;
-// app.listen(port, () => {
-//   console.log(`Server running on http://localhost:${port}`);
-// });
-
-
-
-
 const express = require('express');
 const app = express();
 
@@ -94,9 +21,14 @@ const playwright = require('playwright');
 async function scrapeProfiles(url, fields, cookies) {
   console.log(`Scraping search results page: ${url}`);
   
-  // Launch browser (set headless: false to see the browser UI)
-  const browser = await playwright.chromium.launch({ headless: false });
-  const context = await browser.newContext();
+  // Launch browser with production configuration
+  const browser = await playwright.chromium.launch({
+    headless: true, // Always run headless in production
+    args: ['--no-sandbox', '--disable-setuid-sandbox'] // Required for running in Docker/cloud environments
+  });
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' // Add a standard user agent
+  });
 
   // Add cookies if provided.
   if (cookies && Array.isArray(cookies)) {
@@ -192,7 +124,7 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
-const port = 3000;
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
 });
