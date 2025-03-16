@@ -1,5 +1,9 @@
 const express = require('express');
+const cors = require('cors');
 const app = express();
+
+// Enable CORS for all requests
+app.use(cors());
 
 // Middleware to parse JSON request bodies.
 app.use(express.json());
@@ -21,82 +25,118 @@ const playwright = require('playwright');
 async function scrapeProfiles(url, fields, cookies) {
   console.log(`Scraping search results page: ${url}`);
   
-  // Launch browser with production configuration
   const browser = await playwright.chromium.launch({
-    headless: true, // Always run headless in production
-    args: ['--no-sandbox', '--disable-setuid-sandbox'] // Required for running in Docker/cloud environments
+    headless: false,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' // Add a standard user agent
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
   });
 
-  // Add cookies if provided.
   if (cookies && Array.isArray(cookies)) {
     console.log('Adding cookies to context');
     await context.addCookies(cookies);
   }
   
-  const page = await context.newPage();
-  
-  // Navigate to the search results page.
-  await page.goto(url, { waitUntil: 'load', timeout: 120000 });
-  console.log("Search results page loaded");
-
-  // Wait for profile cards to be present.
-  await page.waitForSelector('div[data-view-name="search-entity-result-universal-template"]', { timeout: 30000 });
-  
-  // Get all profile cards.
-  const profileCards = await page.$$('div[data-view-name="search-entity-result-universal-template"]');
-  console.log(`Found ${profileCards.length} profile cards`);
-
   const results = [];
-  
-  // Iterate over each profile card.
-  for (let i = 0; i < profileCards.length; i++) {
-    console.log(`Processing profile card ${i + 1} of ${profileCards.length}`);
+  let currentPage = 1;
+  const maxPages = 2;
+  let currentUrl = url;
+  const page = await context.newPage();
+
+  while (currentPage <= maxPages) {
+    console.log(`Processing page ${currentPage}`);
     
-    // Re-fetch the card to avoid stale element handles.
-    const card = (await page.$$('div[data-view-name="search-entity-result-universal-template"]'))[i];
-    if (!card) continue;
-    
-    // Extract the profile link from the card using an anchor with href starting with "https://www.linkedin.com/in/"
-    let profileLink = null;
-    try {
-      profileLink = await card.$eval('a[href^="https://www.linkedin.com/in/"]', a => a.href);
-    } catch (e) {
-      console.error(`Could not extract link for profile card ${i+1}:`, e);
-      results.push({ profile: null, error: "Could not extract link" });
-      continue;
-    }
-    
-    // Open a new page and navigate to the profile link.
-    const profilePage = await context.newPage();
-    try {
-      await profilePage.goto(profileLink, { waitUntil: 'load', timeout: 60000 });
-      console.log(`Profile page loaded: ${profilePage.url()}`);
+    await page.goto(currentUrl, { waitUntil: 'load', timeout: 120000 });
+    console.log("Page loaded");
+
+    await page.waitForSelector('div[data-view-name="search-entity-result-universal-template"]', { timeout: 30000 });
+    const profileCards = await page.$$('div[data-view-name="search-entity-result-universal-template"]');
+    console.log(`Found ${profileCards.length} profile cards`);
+
+    for (let i = 0; i < profileCards.length; i++) {
+      // TESTING: Only process the last profile
+      if (i < profileCards.length - 1) continue;
       
-      // Wait for the button with an ARIA label starting with "Current company:".
-      await profilePage.waitForSelector('button[aria-label^="Current company:"]', { timeout: 10000 });
-      const button = await profilePage.$('button[aria-label^="Current company:"]');
-      let currentCompany = null;
+      const card = (await page.$$('div[data-view-name="search-entity-result-universal-template"]'))[i];
+      if (!card) continue;
       
-      if (button) {
-        const ariaLabel = await button.getAttribute('aria-label');
-        // Example ARIA label: "Current company: WisdomAI. Click to skip to experience card"
-        const match = ariaLabel.match(/Current company:\s*(.*?)\.\s*Click to skip/);
-        if (match) {
-          currentCompany = match[1].trim();
-        }
+      let profileLink = null;
+      try {
+        profileLink = await card.$eval('a[href^="https://www.linkedin.com/in/"]', a => a.href);
+      } catch (e) {
+        console.error(`Could not extract link for profile card ${i+1}:`, e);
+        results.push({ profile: null, error: "Could not extract link" });
+        continue;
       }
       
-      console.log(`Extracted company: ${currentCompany}`);
-      results.push({ profile: profilePage.url(), currentCompany });
-    } catch (err) {
-      console.error(`Error processing profile card ${i + 1}:`, err);
-      results.push({ profile: profileLink, error: err.toString() });
+      const profilePage = await context.newPage();
+      try {
+        await profilePage.goto(profileLink, { waitUntil: 'load', timeout: 60000 });
+        console.log(`Profile page loaded: ${profilePage.url()}`);
+        
+        await profilePage.waitForSelector('button[aria-label^="Current company:"]', { timeout: 10000 });
+        const button = await profilePage.$('button[aria-label^="Current company:"]');
+        let currentCompany = null;
+        
+        if (button) {
+          const ariaLabel = await button.getAttribute('aria-label');
+          const match = ariaLabel.match(/Current company:\s*(.*?)\.\s*Click to skip/);
+          if (match) {
+            currentCompany = match[1].trim();
+          }
+        }
+        
+        console.log(`Extracted company: ${currentCompany}`);
+        results.push({ profile: profilePage.url(), currentCompany });
+      } catch (err) {
+        console.error(`Error processing profile card ${i + 1}:`, err);
+        results.push({ profile: profileLink, error: err.toString() });
+      }
+      
+      await profilePage.close();
     }
-    
-    await profilePage.close();
+
+    if (currentPage <= maxPages) {
+      try {
+        console.log('Scrolling to bottom of page...');
+        // Scroll to bottom
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        // Wait a bit for content to load after scroll
+        await page.waitForTimeout(5000);
+
+        console.log('Looking for Next buttons...');
+        const nextButtons = await page.$$('button[aria-label="Next"]');
+        console.log(`Found ${nextButtons.length} Next buttons`);
+
+        // Log details about each button found
+        for (let i = 0; i < nextButtons.length; i++) {
+          const buttonText = await nextButtons[i].evaluate(el => el.textContent.trim());
+          const buttonClass = await nextButtons[i].evaluate(el => el.getAttribute('class'));
+          console.log(`Button ${i + 1}:`, { text: buttonText, class: buttonClass });
+        }
+        
+        if (nextButtons.length > 0) {
+          console.log('Attempting to click the last Next button found...');
+          // Click the last Next button (usually the pagination one)
+          await nextButtons[nextButtons.length - 1].click();
+          
+          console.log('Waiting for navigation...');
+          await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 });
+          currentUrl = page.url();
+          console.log('Navigation successful, new URL:', currentUrl);
+          currentPage++;
+        } else {
+          console.log('No Next buttons found on the page');
+          break;
+        }
+      } catch (error) {
+        console.error('Error during pagination:', error);
+        break;
+      }
+    } else {
+      break;
+    }
   }
   
   await browser.close();
