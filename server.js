@@ -1,167 +1,236 @@
 const express = require('express');
 const cors = require('cors');
 const app = express();
+const playwright = require('playwright');
+require('dotenv').config();
 
-// Enable CORS for all requests
-app.use(cors());
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://mole.tejasvajaitly.com'
+];
 
-// Middleware to parse JSON request bodies.
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    methods: ['GET', 'POST'],
+  })
+);
+
 app.use(express.json());
 
-// Import Playwright for scraping.
-const playwright = require('playwright');
-
 /**
- * Scrapes all profiles from a LinkedIn search results page.
- * For each profile card (div with data-view-name="search-entity-result-universal-template"),
- * the code extracts the profile link from an anchor inside the card (using an href that starts with "https://www.linkedin.com/in/"),
- * opens the profile in a new page, then extracts the current company name from the button with the ARIA label.
- *
- * @param {string} url - URL of the LinkedIn search results page.
- * @param {Array} fields - (Optional) Additional fields (not used in this example).
- * @param {Array} cookies - Array of cookie objects for authentication.
- * @returns {Object} - An object with an array of results.
+ * scrapeProfiles sends events for each grouped phase.
  */
-async function scrapeProfiles(url, fields, cookies) {
-  console.log(`Scraping search results page: ${url}`);
-  
+async function scrapeProfiles(url, fields, cookies, sendEvent) {
+  // Group 1: Browser Setup
+  sendEvent('browser-setup', { message: 'Launching browser' });
   const browser = await playwright.chromium.launch({
-    headless: false,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-  });
+  sendEvent('browser-setup', { message: 'Browser launched' });
 
+  sendEvent('browser-setup', { message: 'Creating browser context' });
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+  });
+  sendEvent('browser-setup', { message: 'Browser context created' });
+
+  sendEvent('browser-setup', { message: 'Adding cookies' });
   if (cookies && Array.isArray(cookies)) {
-    console.log('Adding cookies to context');
     await context.addCookies(cookies);
   }
-  
-  const results = [];
+  sendEvent('browser-setup', { message: 'Cookies added' });
+
+  sendEvent('browser-setup', { message: 'Opening new page' });
+  const page = await context.newPage();
+  sendEvent('browser-setup', { message: 'New page opened' });
+
+  let allResults = [];
   let currentPage = 1;
   const maxPages = 2;
   let currentUrl = url;
-  const page = await context.newPage();
+  let finalHtml = []
 
+  // Group 2: Loading LinkedIn Page
   while (currentPage <= maxPages) {
-    console.log(`Processing page ${currentPage}`);
-    
+    sendEvent('playwright-scraping', { message: `Loading LinkedIn page` });
     await page.goto(currentUrl, { waitUntil: 'load', timeout: 120000 });
-    console.log("Page loaded");
-
+    sendEvent('playwright-scraping', { message: 'LinkedIn page loaded' });
+    
+    sendEvent('playwright-scraping', { message: 'Waiting for search result cards' });
     await page.waitForSelector('div[data-view-name="search-entity-result-universal-template"]', { timeout: 30000 });
-    const profileCards = await page.$$('div[data-view-name="search-entity-result-universal-template"]');
-    console.log(`Found ${profileCards.length} profile cards`);
+    sendEvent('playwright-scraping', { message: 'Search result cards found' });
 
-    for (let i = 0; i < profileCards.length; i++) {
-      // TESTING: Only process the last profile
-      if (i < profileCards.length - 1) continue;
-      
-      const card = (await page.$$('div[data-view-name="search-entity-result-universal-template"]'))[i];
-      if (!card) continue;
-      
-      let profileLink = null;
-      try {
-        profileLink = await card.$eval('a[href^="https://www.linkedin.com/in/"]', a => a.href);
-      } catch (e) {
-        console.error(`Could not extract link for profile card ${i+1}:`, e);
-        results.push({ profile: null, error: "Could not extract link" });
-        continue;
-      }
-      
-      const profilePage = await context.newPage();
-      try {
-        await profilePage.goto(profileLink, { waitUntil: 'load', timeout: 60000 });
-        console.log(`Profile page loaded: ${profilePage.url()}`);
-        
-        await profilePage.waitForSelector('button[aria-label^="Current company:"]', { timeout: 10000 });
-        const button = await profilePage.$('button[aria-label^="Current company:"]');
-        let currentCompany = null;
-        
-        if (button) {
-          const ariaLabel = await button.getAttribute('aria-label');
-          const match = ariaLabel.match(/Current company:\s*(.*?)\.\s*Click to skip/);
-          if (match) {
-            currentCompany = match[1].trim();
-          }
-        }
-        
-        console.log(`Extracted company: ${currentCompany}`);
-        results.push({ profile: profilePage.url(), currentCompany });
-      } catch (err) {
-        console.error(`Error processing profile card ${i + 1}:`, err);
-        results.push({ profile: profileLink, error: err.toString() });
-      }
-      
-      await profilePage.close();
-    }
+    // Group 3: Extracting Profile Cards
+    sendEvent('playwright-scraping', { message: `Extracting profile cards on ${currentPage}` });
+     const cardsHtml = await page.$$eval(
+      'div[data-view-name="search-entity-result-universal-template"]',
+      (cards) => cards.map((card) => card.outerHTML)
+    );
+    sendEvent('playwright-scraping', { message: `Extracted profile cards on page ${currentPage}` });
+    finalHtml.push(...cardsHtml)
 
-    if (currentPage <= maxPages) {
+
+    // Group 5: Navigating & Loading More Results
+    if (currentPage < maxPages) {
+      sendEvent('playwright-scraping', { message: 'Attempting to navigate to next page' });
       try {
-        console.log('Scrolling to bottom of page...');
-        // Scroll to bottom
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        // Wait a bit for content to load after scroll
         await page.waitForTimeout(5000);
-
-        console.log('Looking for Next buttons...');
         const nextButtons = await page.$$('button[aria-label="Next"]');
-        console.log(`Found ${nextButtons.length} Next buttons`);
-
-        // Log details about each button found
-        for (let i = 0; i < nextButtons.length; i++) {
-          const buttonText = await nextButtons[i].evaluate(el => el.textContent.trim());
-          const buttonClass = await nextButtons[i].evaluate(el => el.getAttribute('class'));
-          console.log(`Button ${i + 1}:`, { text: buttonText, class: buttonClass });
-        }
-        
         if (nextButtons.length > 0) {
-          console.log('Attempting to click the last Next button found...');
-          // Click the last Next button (usually the pagination one)
           await nextButtons[nextButtons.length - 1].click();
-          
-          console.log('Waiting for navigation...');
+          sendEvent('playwright-scraping', { message: 'Clicked next button. Waiting for navigation' });
           await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 });
           currentUrl = page.url();
-          console.log('Navigation successful, new URL:', currentUrl);
+          sendEvent('playwright-scraping', { message: 'Browser navigated to next page' });
           currentPage++;
         } else {
-          console.log('No Next buttons found on the page');
+          sendEvent('playwright-scraping', { message: 'No next button found. Ending pagination.' });
           break;
         }
       } catch (error) {
-        console.error('Error during pagination:', error);
+        sendEvent('error', { message: 'Error navigating to next page', error: error.toString() });
         break;
       }
     } else {
+      sendEvent('playwright-scraping', { message: 'Pagination limit reached.' });
       break;
     }
   }
+
+
+  try {
+    sendEvent('openai-extracting', { message: 'Starting parallel processing of pages' });
+    
+    // Create array of promises with their index
+    const pagePromises = finalHtml.map((pageCards, index) => {
+      return testOpenAIBatch(pageCards)
+        .then(result => {
+          sendEvent('openai-extracting', { message: `Successfully processed profile ${index + 1}` });
+          return result;
+        })
+        .catch(error => {
+          sendEvent('error', { message: `Failed to process profile ${index + 1}`, error: error.toString() });
+          throw error; // Re-throw to be caught by Promise.all
+        });
+    });
   
+    const pageResults = await Promise.all(pagePromises);
+    allResults = pageResults.flat();
+    sendEvent('openai-extracting', { message: 'All pages processed successfully.' });
+  
+  } catch (openaiError) {
+    sendEvent('error', { message: 'OpenAI error processing pages', error: openaiError.toString() });
+    allResults = finalHtml.flat().map((html) => ({
+      error: 'OpenAI processing failed',
+      rawHtml: html,
+    }));
+  }
+
+  // Group 6: Finalizing
+  sendEvent('finishing', { message: 'Closing browser' });
   await browser.close();
-  return { results };
+  sendEvent('finishing', { message: 'Browser closed' });
+  sendEvent('finishing', { message: 'Scraping finished' });
+  return { results: allResults };
 }
 
-// Simple GET endpoint.
+async function testOpenAIBatch(profilesHtml) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a helpful assistant that extracts specific information from LinkedIn search result cards. Always respond with valid JSON array.',
+        },
+        {
+          role: 'user',
+          content: `Extract information from these LinkedIn profile cards (${profilesHtml.length} cards). For each card, create an object with these fields: name, headline, location, currentCompany, profilePhotoUrl, profileUrl. Return ONLY a JSON array of these objects. Do not include any other text or explanation. Profile Cards HTML: ${JSON.stringify(
+            profilesHtml
+          )}`,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+  if (data.error) {
+    console.log("Openai error", data.error)
+    throw new Error(`OpenAI API Error: ${data.error.message}`);
+  }
+
+  const content = data.choices[0].message.content.trim();
+  try {
+    return JSON.parse(content);
+  } catch (parseError) {
+    const cleanedContent = content.replace(/^```json\n?|\n?```$/g, '');
+    return JSON.parse(cleanedContent);
+  }
+}
+
+/**
+ * Helper function to send SSE events.
+ */
+function sendSSE(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+// GET endpoint for a simple greeting.
 app.get('/', (req, res) => {
   res.send('Hello, World!');
 });
 
-// POST endpoint for /scrape.
-app.post('/scrape', async (req, res) => {
+/**
+ * GET endpoint for /scrape using query parameters and Server-Sent Events.
+ */
+app.get('/scrape', async (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+
+  const sendEvent = (event, data) => {
+    sendSSE(res, event, data);
+  };
+
   try {
-    const { url, fields, cookies } = req.body;
+    const url = req.query.url;
     if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
+      sendEvent('error', { message: 'URL is required' });
+      return res.end();
     }
-    
-    const data = await scrapeProfiles(url, fields, cookies);
-    res.json(data);
+    const fields = req.query.fields ? JSON.parse(req.query.fields) : [];
+    const cookies = req.query.cookies ? JSON.parse(req.query.cookies) : [];
+
+    sendEvent('browser-setup', { message: 'Scraping started' });
+    const data = await scrapeProfiles(url, fields, cookies, sendEvent);
+    sendEvent('finishing', "wrapup!");
+    sendEvent('result', data);
   } catch (error) {
     console.error('Scrape error:', error);
-    res.status(500).json({ error: error.toString() });
+    sendEvent('error', { message: error.toString() });
   }
+  
+  res.end();
 });
 
 const port = process.env.PORT || 3000;
